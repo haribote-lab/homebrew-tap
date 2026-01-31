@@ -1,0 +1,108 @@
+name: Update Formula
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Fetch latest release and update formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          REPO="haribote-lab/github-app-cli"
+          FORMULA="Formula/gha.rb"
+
+          RELEASE=$(gh api "repos/${REPO}/releases/latest" 2>/dev/null) || {
+            echo "No releases found, skipping"
+            exit 0
+          }
+
+          VERSION=$(echo "$RELEASE" | jq -r '.tag_name | ltrimstr("v")')
+          CURRENT_VERSION=""
+          if [ -f "$FORMULA" ]; then
+            CURRENT_VERSION=$(grep -oP 'version "\K[^"]+' "$FORMULA" || true)
+          fi
+
+          if [ "$VERSION" = "$CURRENT_VERSION" ]; then
+            echo "Already up to date: v${VERSION}"
+            exit 0
+          fi
+
+          echo "Updating formula: ${CURRENT_VERSION:-none} -> ${VERSION}"
+
+          get_sha256() {
+            local os=$1 arch=$2
+            local asset_name="gha_${VERSION}_${os}_${arch}.tar.gz"
+            local checksum_url
+            checksum_url=$(echo "$RELEASE" | jq -r '.assets[] | select(.name == "gha_'"${VERSION}"'_checksums.txt") | .browser_download_url')
+            curl -sL "$checksum_url" | grep "$asset_name" | awk '{print $1}'
+          }
+
+          SHA_DARWIN_ARM64=$(get_sha256 darwin arm64)
+          SHA_DARWIN_AMD64=$(get_sha256 darwin amd64)
+          SHA_LINUX_ARM64=$(get_sha256 linux arm64)
+          SHA_LINUX_AMD64=$(get_sha256 linux amd64)
+
+          for sha_var in SHA_DARWIN_ARM64 SHA_DARWIN_AMD64 SHA_LINUX_ARM64 SHA_LINUX_AMD64; do
+            if [ -z "${!sha_var}" ]; then
+              echo "ERROR: Failed to get checksum for ${sha_var}"
+              exit 1
+            fi
+          done
+
+          cat > "$FORMULA" << RUBY
+          class Gha < Formula
+            desc "Proxy gh CLI commands with GitHub App authentication"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/gha_${VERSION}_darwin_arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/gha_${VERSION}_darwin_amd64.tar.gz"
+                sha256 "${SHA_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/gha_${VERSION}_linux_arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              else
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/gha_${VERSION}_linux_amd64.tar.gz"
+                sha256 "${SHA_LINUX_AMD64}"
+              end
+            end
+
+            def install
+              bin.install "gha"
+            end
+
+            test do
+              system "#{bin}/gha", "--version"
+            end
+          end
+          RUBY
+
+          sed -i 's/^          //' "$FORMULA"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$FORMULA"
+          git commit -m "feat: update gha to v${VERSION}"
+          git push
