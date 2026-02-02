@@ -2,11 +2,12 @@ name: Update Formula
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update:
@@ -42,6 +43,14 @@ jobs:
 
           echo "Updating formula: ${CURRENT_VERSION:-none} -> ${VERSION}"
 
+          BRANCH="update-formula/v${VERSION}"
+
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #${EXISTING_PR} already exists for v${VERSION}, skipping"
+            exit 0
+          fi
+
           get_sha256() {
             local os=$1 arch=$2
             local asset_name="gha_${VERSION}_${os}_${arch}.tar.gz"
@@ -61,6 +70,10 @@ jobs:
               exit 1
             fi
           done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
 
           mkdir -p "$(dirname "$FORMULA")"
 
@@ -103,8 +116,12 @@ jobs:
 
           sed -i 's/^          //' "$FORMULA"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$FORMULA"
           git commit -m "feat: update gha to v${VERSION}"
-          git push
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "feat: update gha to v${VERSION}" \
+            --body "Auto-generated formula update to v${VERSION}." \
+            --base main \
+            --head "$BRANCH"
